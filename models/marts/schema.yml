@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: fact_adverse_events
+    description: "Fakty MAUDE — zdarzenia z narracją"
+    columns:
+      - name: event_id
+        tests: [not_null, unique]
+      - name: date_received
+        tests: [not_null]
+      - name: narrative_text
+        tests:
+          - not_null:
+              config:
+                where: "narrative_len > 0"

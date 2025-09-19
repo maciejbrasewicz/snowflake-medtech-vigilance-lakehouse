@@ -1,14 +1,49 @@
+# models/stg/schema.yml
 version: 2
 
 models:
   - name: stg_maude
-    description: "Staging MAUDE złożony z mdr_text[].text → narrative_text"
+    description: "Staging MAUDE: normalizacja event_type, scalanie mdr_text[].text → narrative_text; brak utraty rekordów (FLATTEN OUTER)."
     columns:
+      - name: mdr_report_key
+        description: "Klucz raportu MAUDE"
+        tests:
+          - not_null
+          - unique
+
       - name: report_number
-        tests: [not_null]
-      - name: date_received
-        tests: [not_null]
+        description: "Numer raportu (może nie być globalnie unikalny)"
+        tests:
+          - not_null
+
       - name: event_type
+        description: "Znormalizowany typ zdarzenia: Injury/Malfunction/Death/Other/No Answer Provided"
         tests:
           - accepted_values:
               values: ['Injury','Malfunction','Death','Other','No Answer Provided']
+
+      - name: narrative_text
+        description: "Połączona narracja z mdr_text[].text"
+        tests:
+          # Wymagamy narracji tylko, gdy faktycznie istnieje co najmniej jeden niepusty fragment
+          # (jeżeli w źródle nie było tekstu, test jest pomijany dzięki warunkowi).
+          - not_null:
+              config:
+                where: "narrative_len > 0"
+
+      - name: date_received
+        description: "Data przyjęcia raportu (może być NULL w danych FDA)"
+        tests: []   # nie wymuszamy not_null – realne zbiory czasem nie mają daty
+
+      - name: product_code
+        description: "Kod produktu urządzenia (może być NULL)"
+        tests: []
+
+      - name: manufacturer_name
+        description: "Nazwa producenta z raportu"
+        tests: []
+
+      - name: narrative_len
+        description: "Długość scalonej narracji (pomocnicza, do warunków w testach)"
+        tests: []  # brak twardych asercji; używana w WHERE powyżej
+

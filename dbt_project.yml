@@ -1,0 +1,15 @@
+name: 'medtech_vigilance'
+version: '1.0'
+config-version: 2
+
+profile: 'medtech_vigilance'  # dbt Cloud stworzy profil automatycznie
+
+models:
+  medtech_vigilance:
+    +materialized: view        # domyślnie
+    stg:
+      +schema: stg             # modele w MEDTECH.STG
+      +materialized: view
+    marts:
+      +schema: marts           # modele w MEDTECH.MARTS
+      +materialized: table

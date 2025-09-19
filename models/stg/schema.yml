@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: stg_maude
+    description: "Staging MAUDE złożony z mdr_text[].text → narrative_text"
+    columns:
+      - name: report_number
+        tests: [not_null]
+      - name: date_received
+        tests: [not_null]
+      - name: event_type
+        tests:
+          - accepted_values:
+              values: ['Injury','Malfunction','Death','Other','No Answer Provided']

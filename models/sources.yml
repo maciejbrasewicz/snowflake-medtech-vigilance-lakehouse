@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: medtech
+    database: MEDTECH
+    schema: PUBLIC
+    tables:
+      - name: MAUDE_RAW

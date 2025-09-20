@@ -1,87 +1,87 @@
--- models/stg/stg_maude.sql
 {{ config(materialized='view') }}
 
-with base as (
-  select
+WITH base AS (
+  SELECT
     raw,
-    /* klucze i podstawowe pola */
-    raw:"mdr_report_key"::string             as mdr_report_key,
-    raw:"report_number"::string              as report_number,
-
-    /* daty (UDF istnieje w MEDTECH.PUBLIC – fallback niepotrzebny) */
-    MEDTECH.PUBLIC.PARSE_YYYYMMDD(raw:"date_received"::string) as date_received,
-    MEDTECH.PUBLIC.PARSE_YYYYMMDD(raw:"event_date"::string)     as event_date,
-
-    /* event_type w oryginale + normalizacja do kanonicznych wartości */
-    raw:"event_type"::string                 as event_type_raw,
-    case
-      when upper(trim(raw:"event_type"::string)) in ('INJURY','MALFUNCTION','DEATH')
-        then initcap(trim(raw:"event_type"::string))                                   -- Injury/Malfunction/Death
-      when raw:"event_type"::string is null or trim(raw:"event_type"::string) = '' 
-           or upper(trim(raw:"event_type"::string)) in ('N/A','NA','UNKNOWN','NOT AVAILABLE')
-        then 'No Answer Provided'
-      else 'Other'
-    end                                         as event_type,
-
-    /* pozostałe atrybuty */
-    raw:"product_problem"::string            as product_problem,
-    raw:"device_report_product_code"::string as product_code,
-    raw:"device_name"::string                as device_name,
-    raw:"brand_name"::string                 as brand_name,
-    raw:"manufacturer_d_name"::string        as manufacturer_name,
-    raw:"manufacturer_g1_name"::string       as manufacturer_g1_name,
-
-    /* metadane ładowania */
+    raw:"mdr_report_key"::string  AS mdr_report_key,
+    raw:"report_number"::string   AS report_number,
+    MEDTECH.PUBLIC.PARSE_YYYYMMDD(raw:"date_received"::string) AS date_received,
+    MEDTECH.PUBLIC.PARSE_YYYYMMDD(raw:"event_date"::string)     AS event_date,
+    raw:"event_type"::string AS event_type_raw,
+    CASE
+      WHEN UPPER(TRIM(raw:"event_type"::string)) IN ('INJURY','MALFUNCTION','DEATH')
+        THEN INITCAP(TRIM(raw:"event_type"::string))
+      WHEN raw:"event_type"::string IS NULL OR TRIM(raw:"event_type"::string) = ''
+        OR UPPER(TRIM(raw:"event_type"::string)) IN ('N/A','NA','UNKNOWN','NOT AVAILABLE')
+        THEN 'No Answer Provided'
+      ELSE 'Other'
+    END AS event_type,
+    raw:"product_problem"::string            AS product_problem,
+    raw:"device_report_product_code"::string AS product_code,
+    /* top-level (często puste) */
+    raw:"device_name"::string          AS device_name_top,
+    raw:"brand_name"::string           AS brand_name_top,
+    raw:"manufacturer_d_name"::string  AS manufacturer_name_top,
+    raw:"manufacturer_g1_name"::string AS manufacturer_g1_name_top,
     src_filename,
     load_ts
-  from {{ source('medtech','MAUDE_RAW') }}
+  FROM {{ source('medtech','MAUDE_RAW') }}
 ),
 
-flat as (
-  /* OUTER => TRUE żeby NIE gubić rekordów bez mdr_text (zostanie jedna linia z NULL-em) */
-  select
+/* >>> producenci/brand z device[] */
+devices_agg AS (
+  SELECT
+    b.mdr_report_key,
+    MAX(IFF(NULLIF(TRIM(d.value:"manufacturer_d_name"::string), '') IS NOT NULL,
+            d.value:"manufacturer_d_name"::string, NULL))  AS manufacturer_name_dev,
+    MAX(IFF(NULLIF(TRIM(d.value:"manufacturer_g1_name"::string), '') IS NOT NULL,
+            d.value:"manufacturer_g1_name"::string, NULL)) AS manufacturer_g1_name_dev,
+    MAX(IFF(NULLIF(TRIM(d.value:"brand_name"::string), '') IS NOT NULL,
+            d.value:"brand_name"::string, NULL))           AS brand_name_dev,
+    MAX(IFF(NULLIF(TRIM(d.value:"device_name"::string), '') IS NOT NULL,
+            d.value:"device_name"::string, NULL))          AS device_name_dev
+  FROM base b,
+  LATERAL FLATTEN(input => b.raw:"device", OUTER => TRUE) d
+  GROUP BY 1
+),
+
+/* narracja z mdr_text (OUTER => zachowaj też puste) */
+text_flat AS (
+  SELECT
     b.*,
     f.index,
-    nullif(trim(f.value:"text"::string), '') as text_piece
-  from base b,
-  lateral flatten(input => b.raw:"mdr_text", OUTER => TRUE) f
+    NULLIF(TRIM(f.value:"text"::string), '') AS text_piece
+  FROM base b,
+  LATERAL FLATTEN(input => b.raw:"mdr_text", OUTER => TRUE) f
 )
 
-select
-  /* klucze */
-  mdr_report_key,
-  report_number,
-
-  /* daty */
-  date_received,
-  event_date,
-
-  /* typ zdarzenia (znormalizowany) i oryginał (dla ewentualnych analiz) */
-  event_type,
-  event_type_raw,
-
-  /* reszta pól */
-  product_problem,
-  product_code,
-  device_name,
-  brand_name,
-  manufacturer_name,
-  manufacturer_g1_name,
-
-  /* scalona narracja; listagg ignoruje NULL-e */
-  listagg(text_piece, '\n') within group (order by index) as narrative_text,
-
-  /* metadane */
-  src_filename,
-  load_ts,
-
-  /* pomocnicza metryka do testów/warunków */
-  length(listagg(text_piece, '\n') within group (order by index)) as narrative_len
-from flat
-group by
-  mdr_report_key, report_number,
-  date_received, event_date,
-  event_type, event_type_raw,
-  product_problem, product_code, device_name, brand_name,
-  manufacturer_name, manufacturer_g1_name,
-  src_filename, load_ts
+/* final: COALESCE(top-level, device[]), scalona narracja */
+SELECT
+  t.mdr_report_key,
+  t.report_number,
+  t.date_received,
+  t.event_date,
+  t.event_type,
+  t.event_type_raw,
+  t.product_problem,
+  t.product_code,
+  COALESCE(t.device_name_top,  d.device_name_dev)   AS device_name,
+  COALESCE(t.brand_name_top,   d.brand_name_dev)    AS brand_name,
+  COALESCE(t.manufacturer_name_top,    d.manufacturer_name_dev)    AS manufacturer_name,
+  COALESCE(t.manufacturer_g1_name_top, d.manufacturer_g1_name_dev) AS manufacturer_g1_name,
+  LISTAGG(t.text_piece, '\n') WITHIN GROUP (ORDER BY t.index) AS narrative_text,
+  t.src_filename,
+  t.load_ts,
+  LENGTH(LISTAGG(t.text_piece, '\n') WITHIN GROUP (ORDER BY t.index)) AS narrative_len
+FROM text_flat t
+LEFT JOIN devices_agg d USING (mdr_report_key)
+GROUP BY
+  t.mdr_report_key, t.report_number,
+  t.date_received, t.event_date,
+  t.event_type, t.event_type_raw,
+  t.product_problem, t.product_code,
+  t.device_name_top,  d.device_name_dev,
+  t.brand_name_top,   d.brand_name_dev,
+  t.manufacturer_name_top,    d.manufacturer_name_dev,
+  t.manufacturer_g1_name_top, d.manufacturer_g1_name_dev,
+  t.src_filename, t.load_ts

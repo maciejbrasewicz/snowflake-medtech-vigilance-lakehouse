@@ -1,46 +1,90 @@
 {{ config(materialized='table') }}
 
-with s as (
-  select * from {{ ref('stg_maude') }}
+WITH s AS (
+  -- surowe zdarzenia po stagingu
+  SELECT
+    mdr_report_key,
+    report_number,
+    date_received,
+    event_date,
+    event_type,
+    product_problem,
+    product_code,
+    device_name,
+    brand_name,
+    manufacturer_name,
+    manufacturer_g1_name,
+    narrative_text,
+    LENGTH(narrative_text) AS narrative_len
+  FROM {{ ref('stg_maude') }}
 ),
-d as (
-  -- na start bezpośrednio DIM z PUBLIC
-  select raw_name, canonical_name, min(manufacturer_id) as manufacturer_id
-  from MEDTECH.PUBLIC.DIM_MANUFACTURER
-  group by 1,2
+
+-- mapa producentów z seeda (kanonizacja nazw)
+d AS (
+  SELECT
+    UPPER(TRIM(raw_name)) AS raw_name_u,
+    canonical_name,
+    manufacturer_id
+  FROM {{ ref('manufacturer_map') }}     -- <-- jeśli seed masz jako "manufacturer", zamień na ref('manufacturer')
+),
+
+-- wybór "surowej" nazwy producenta do złączenia (główna, potem g1, potem brand)
+s_with_raw AS (
+  SELECT
+    s.*,
+    UPPER(TRIM(
+      COALESCE(s.manufacturer_name, s.manufacturer_g1_name, s.brand_name)
+    )) AS manufacturer_name_u
+  FROM s
 )
 
-select
-  to_varchar(
-    sha2(
-      coalesce(s.report_number,'') || '|' ||
-      coalesce(s.mdr_report_key,'') || '|' ||
-      coalesce(to_varchar(s.date_received),''),
+SELECT
+  -- stabilny klucz zdarzenia (hash kluczowych pól)
+  TO_VARCHAR(
+    SHA2(
+      COALESCE(report_number, '') || '|' ||
+      COALESCE(mdr_report_key, '') || '|' ||
+      COALESCE(TO_VARCHAR(date_received), ''),
       256
     )
-  ) as event_id,
+  ) AS event_id,
 
-  s.report_number, s.mdr_report_key,
+  -- identyfikatory źródła
+  report_number,
+  mdr_report_key,
+
+  -- producent po kanonizacji (z seeda) + id (może być NULL, jeśli brak w mapie)
   d.manufacturer_id,
-  d.canonical_name as canonical_mfr,
+  COALESCE(d.canonical_name, manufacturer_name) AS canonical_mfr,
 
-  s.product_code, s.device_name, s.brand_name,
-  s.event_type, s.product_problem,
-  s.event_date, s.date_received,
-  to_char(s.date_received, 'YYYY-"Q"Q') as year_quarter,
+  -- atrybuty produktu / zdarzenia
+  product_code,
+  device_name,
+  brand_name,
+  event_type,
+  product_problem,
 
-  s.narrative_text,
-  length(s.narrative_text) as narrative_len,
+  -- daty i etykiety czasu
+  event_date,
+  date_received,
+  TO_CHAR(date_received, 'YYYY-"Q"Q') AS year_quarter,
 
-  case
-    when s.narrative_text ilike '%LEAK%'       then 'LEAK'
-    when s.narrative_text ilike '%FRACTURE%'   then 'FRACTURE'
-    when s.narrative_text ilike '%BREAK%'      then 'FRACTURE/BREAK'
-    when s.narrative_text ilike '%THROMB%'     then 'THROMBUS/CLOT'
-    when s.narrative_text ilike '%INFECTION%'  then 'INFECTION'
-    when s.narrative_text ilike '%DISLODG%'    then 'DISLODGEMENT'
-    when s.narrative_text ilike '%MIGRAT%'     then 'MIGRATION'
-    else null
-  end as failure_mode
-from s
-left join d on d.raw_name = s.manufacturer_name
+  -- narracja
+  narrative_text,
+  narrative_len,
+
+  -- prosta heurystyka failure_mode (do czasu AISQL)
+  CASE
+    WHEN narrative_text ILIKE '%LEAK%'       THEN 'LEAK'
+    WHEN narrative_text ILIKE '%FRACTURE%'   THEN 'FRACTURE'
+    WHEN narrative_text ILIKE '%BREAK%'      THEN 'FRACTURE/BREAK'
+    WHEN narrative_text ILIKE '%THROMB%'     THEN 'THROMBUS/CLOT'
+    WHEN narrative_text ILIKE '%INFECTION%'  THEN 'INFECTION'
+    WHEN narrative_text ILIKE '%DISLODG%'    THEN 'DISLODGEMENT'
+    WHEN narrative_text ILIKE '%MIGRAT%'     THEN 'MIGRATION'
+    ELSE NULL
+  END AS failure_mode
+
+FROM s_with_raw s
+LEFT JOIN d
+  ON d.raw_name_u = s.manufacturer_name_u;
